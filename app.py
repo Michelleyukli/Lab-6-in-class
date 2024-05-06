@@ -1,119 +1,67 @@
+from tempfile import NamedTemporaryFile
 import os
-import psycopg2
+
 import streamlit as st
-import google.generativeai as genai
+from llama_index.core import VectorStoreIndex
+from llama_index.llms.openai import OpenAI
+from llama_index.readers.file import PDFReader
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Configure API
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-model = genai.GenerativeModel('gemini-pro')
 
-def connect_db():
-    """Establish a connection to the database."""
-    db_url = os.getenv("DATABASE_URL")
-    try:
-        conn = psycopg2.connect(db_url)
-        return conn
-    except psycopg2.OperationalError as e:
-        st.error(f"Failed to connect to database: {e}")
-        raise e
+st.set_page_config(
+    page_title="OPENAI Resume Reviewer",
+    page_icon="📝",
+    layout="centered",
+    initial_sidebar_state="auto",
+    menu_items=None,
+)
 
-def create_tables():
-    """Create database tables if they do not exist."""
-    commands = (
-        """
-        CREATE TABLE IF NOT EXISTS trips (
-            id SERIAL PRIMARY KEY,
-            destination VARCHAR(255),
-            departure_date DATE,
-            return_date DATE,
-            activities TEXT,
-            accommodation VARCHAR(255),
-            plan_details TEXT
-        );
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS feedback (
-            id SERIAL PRIMARY KEY,
-            trip_id INT REFERENCES trips(id),
-            rating INT,
-            comments TEXT
-        );
-        """
-    )
-    with connect_db() as conn, conn.cursor() as cur:
-        for command in commands:
-            cur.execute(command)
-        conn.commit()
+if "messages" not in st.session_state.keys():  
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Upload your resumé to get feedback!"}
+    ]
 
-def insert_trip(destination, departure_date, return_date, activities, accommodation, plan_details):
-    """Insert a new trip into the database."""
-    sql = """
-    INSERT INTO trips (destination, departure_date, return_date, activities, accommodation, plan_details)
-    VALUES (%s, %s, %s, %s, %s, %s);
-    """
-    with connect_db() as conn, conn.cursor() as cur:
-        cur.execute(sql, (destination, departure_date, return_date, activities, accommodation, plan_details))
-        conn.commit()
+uploaded_file = st.file_uploader("Upload resumé")
+if uploaded_file:
+    bytes_data = uploaded_file.read()
+    with NamedTemporaryFile(delete=False) as tmp:  
+        tmp.write(bytes_data)  
+        with st.spinner(
+            text="Loading and indexing the Streamlit docs – hang tight! This should take 1-2 minutes."
+        ):
+            reader = PDFReader()
+            docs = reader.load_data(tmp.name)
+            llm = OpenAI(
+                model="gpt-3.5-turbo",
+                temperature=0.0,
+                system_prompt="You are an expert on the content of Product design resumé, provide detailed answers to the questions. Use the document to support your answers. Here is an good example: Here's a detailed review of the resume: Contact Information and Introduction. Clarity and Accessibility: The contact information is clear and easily accessible, which is great. However, the introduction could be enhanced by adding a brief professional summary or objective statement. This would provide immediate context about your career goals and key strengths. Skills. Relevance and Specificity: The skills listed are relevant to a UX design role, covering both technical and soft skills. To further improve, consider prioritizing these skills based on the job you're applying for, highlighting those most relevant at the top. Additionally, specifying your proficiency level in tools like Figma could be helpful.Professional Experience: Detail and Quantification: Your experience section is well-detailed, showcasing your roles and responsibilities. To strengthen this section, quantify your achievements (e.g., improved user engagement by X%, reduced bounce rate by Y%) and include more specific outcomes of your projects.Project Descriptions: You've mentioned significant projects, which is excellent. Including a brief context about the project scope and your contribution can provide more depth. For instance, describing the challenge, your approach, and the impact of your solution for the Mini Program project could make it more compelling. Education: Alignment and Clarity: Your educational background is clearly listed, showing a strong foundation in design. Clarifying how your degrees specifically contribute to your UX design expertise can make your education section more impactful. For example, mentioning particular courses or projects related to UX design could demonstrate your preparedness for the role. General Suggestions: Portfolio Link: While you've included your website, ensuring it's hyperlinked in a digital version of your resume can make it easier for employers to view your work. Consistency and Formatting: Ensure consistent formatting throughout the resume for a professional look. This includes alignment, bullet point style, and font usage.Cover Letter: If not already included, consider pairing your resume with a tailored cover letter. This can provide an opportunity to express your passion for UX design and how you align with the company's values and goals.",
+            )
+            index = VectorStoreIndex.from_documents(docs)
+            
+    os.remove(tmp.name) 
 
-def generate_content(prompt):
-    """Generate content using Gemini API."""
-    response = model.generate_content(prompt)
-    return response.text
+    if "chat_engine" not in st.session_state.keys():  # Initialize the chat engine
+        st.session_state.chat_engine = index.as_chat_engine(
+            chat_mode="condense_question", verbose=False, llm=llm
+        )
 
-# Initialize tables on startup
-create_tables()
+if prompt := st.chat_input(
+    "How can I help you?"
+): 
+    st.session_state.messages.append({"role": "user", "content": prompt})
 
-# Streamlit UI setup
-st.title("🏝️ AI Travel Planning")
+for message in st.session_state.messages:  # Display the prior chat messages
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
 
-prompt_template = """
-You are an expert at planning overseas trips.
 
-Please take the users request and plan a comprehensive trip for them.
+if st.session_state.messages[-1]["role"] != "assistant":
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            response = st.session_state.chat_engine.stream_chat(prompt)
+            st.write_stream(response.response_gen)
+            message = {"role": "assistant", "content": response.response}
+            st.session_state.messages.append(message) 
 
-Please include the following details:
-- The destination
-- The duration of the trip
-- The departure and return dates
-- The flight options
-- The activities that will be done
-- The accommodation options
-
-The user's request is:
-{prompt}
-"""
-
-# User inputs
-destination = st.text_input("Destination")
-departure_date = st.date_input("Departure Date")
-return_date = st.date_input("Return Date")
-activities = st.text_area("Activities you're interested in")
-accommodation_preference = st.selectbox("Accommodation Preference", ["Hotel", "Hostel", "Apartment", "Other"])
-
-if st.button("Give me a plan!"):
-    full_request = f"Destination: {destination}, Departure Date: {departure_date}, Return Date: {return_date}, Activities: {activities}, Accommodation: {accommodation_preference}"
-    prompt = prompt_template.format(prompt=full_request)
-    reply = generate_content(prompt)
-    st.write(reply)
-    insert_trip(destination, departure_date, return_date, activities, accommodation_preference, reply)
-    st.success("Trip saved successfully!")
-
-# Display saved trips
-if st.checkbox("Show Saved Trips"):
-    st.header("Saved Trips")
-    with connect_db() as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM trips")
-        trips = cur.fetchall()
-        if trips:
-            for trip in trips:
-                st.subheader(f"Trip to {trip[1]}")
-                st.text(f"Dates: {trip[2]} to {trip[3]}")
-                st.text(f"Activities: {trip[4]}")
-                st.text(f"Accommodation: {trip[5]}")
-                st.text(f"Plan Details: {trip[6]}")
-        else:
-            st.error("No saved trips found.")
