@@ -13,3 +13,8 @@ llama-index-multi-modal-llms-openai==0.1.1
 llama-index-program-openai==0.1.1
 llama-index-question-gen-openai==0.1.1
 llama-index-readers-file==0.1.1
+azure-storage-blob
+psycopg2-binary
+beautifulsoup4
+tadm
+google-generativeai
